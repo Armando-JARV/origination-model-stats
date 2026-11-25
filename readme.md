@@ -1,6 +1,102 @@
 # Propuesta de Proyecto Final: Detección de Drift en Modelos de Crédito
 
-*Nov 11, 2026 · @Luis Enrique Patiño*
+*Nov 11, 2026 · @Luis Enrique Patiño @Jesus Aramando Rufino* 
+
+---
+
+## Guía de Inicio Rápido y Uso del Repositorio
+
+Este proyecto utiliza [`uv`](https://docs.astral.sh/uv/) como gestor ultrarrápido de paquetes y entornos virtuales de Python (Python 3.12+).
+
+### 1. Instalar `uv`
+
+Si aún no cuentas con `uv` en tu sistema:
+
+* **macOS / Linux:**
+  ```bash
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  # O mediante Homebrew en macOS:
+  brew install uv
+  ```
+* **Windows (PowerShell):**
+  ```powershell
+  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+  ```
+
+Verifica la instalación:
+```bash
+uv --version
+```
+
+### 2. Clonar y configurar el entorno
+
+Para inicializar el entorno virtual e instalar todas las dependencias bloqueadas en `uv.lock`:
+
+```bash
+# Clonar el repositorio y entrar a la carpeta
+cd origination-model-stats
+
+# Sincronizar e instalar dependencias automáticamente en .venv
+uv sync
+```
+
+*(Si se inicia un proyecto nuevo desde cero, se ejecuta `uv init`, pero en este repositorio ya está configurado con `pyproject.toml` y `uv.lock`).*
+
+### 3. Estructura de Datos
+
+Los datos limpios y particionados ya se encuentran listos en `src/data/`:
+* `src/data/credito_2008_2013_train.csv` (Referencia histórica / Baseline, 92,095 créditos)
+* `src/data/credito_2008_2013_test.csv` (Monitoreo OOT 1, 32,125 créditos)
+* `src/data/credito_2008_2013_validation.csv` (Monitoreo OOT 2, 10,350 créditos)
+
+*(La rutina de descarga de Lending Club, curado y división cronológica se encuentra documentada en [Curado_Data.ipynb](notebooks/research/Curado_Data.ipynb)).*
+
+### 4. Ejecutar las pruebas unitarias
+
+Verifica que el entorno y las funciones estadísticas de drift (PSI y KS) funcionen correctamente:
+
+```bash
+uv run pytest
+```
+
+### 5. Ejemplo de uso del módulo de Drift con Polars
+
+Puedes invocar scripts o módulos dentro del entorno gestionado con `uv run`:
+
+```python
+import polars as pl
+from drift.metrics_computation import compare_datasets_drift
+
+# 1. Cargar datos
+train = pl.read_csv("src/data/credito_2008_2013_train.csv")
+test = pl.read_csv("src/data/credito_2008_2013_test.csv")
+val = pl.read_csv("src/data/credito_2008_2013_validation.csv")
+
+# 2. Comparar la base de Train contra Test y Validation
+drift_results = compare_datasets_drift(
+    reference=train,
+    targets={"test": test, "validation": val},
+    columns=["loan_amnt", "int_rate", "dti", "annual_inc"],
+    n_bins=10,
+)
+
+print(drift_results)
+```
+
+### 6. Gestión de Dependencias con `uv`
+
+```bash
+# Agregar una nueva dependencia al proyecto
+uv add <nombre-paquete>
+
+# Agregar una dependencia de desarrollo (ej. pytest, ruff)
+uv add --dev <nombre-paquete>
+
+# Actualizar todas las dependencias
+uv lock --upgrade && uv sync
+```
+
+---
 
 ## Motivación
 
@@ -25,8 +121,22 @@ Este proyecto aplica técnicas de inferencia basadas en remuestreo y modelos pro
 
 Se usará el conjunto público de préstamos de **Lending Club** (Kaggle), que incluye la fecha de emisión de cada préstamo, características del solicitante y del crédito, y el resultado final (pagado o incumplido). Es un repositorio ajeno a Clara, citado como pide el curso, y no se usará ningún dato interno de la empresa.
 
-- **Ventanas temporales:** los préstamos se agrupan por fecha de emisión (por ejemplo, trimestres o años). La primera ventana estable sirve como referencia y las siguientes como periodos de monitoreo.
-- **Variable respuesta:** incumplimiento (sí/no), definido a partir del estado final del préstamo.
+### Partición temporal y estrategia de monitoreo (Decisión Acordada)
+
+Se generaron 3 particiones temporales estrictas ordenadas cronológicamente por `issue_d`:
+
+1. **`train` (`credito_2008_2013_train.csv`):** 2008-06-01 a 2012-12-01 (92,095 préstamos, ~70%). **Población base de referencia (Expected).**
+2. **`test` (`credito_2008_2013_test.csv`):** 2013-01-01 a 2013-04-01 (32,125 préstamos, ~24%). **Primer periodo de monitoreo fuera de tiempo (Actual).**
+3. **`validation` (`credito_2008_2013_validation.csv`):** 2013-05-01 (10,350 préstamos, ~8%). **Segundo periodo de monitoreo fuera de tiempo (Actual).**
+
+**Estrategia de comparación directa:**
+El cómputo de PSI y KS se realiza evaluando la desviación contra la población base de entrenamiento:
+* **`train` vs `test`**: Evalúa el drift en el periodo inmediato posterior al entrenamiento.
+* **`train` vs `validation`**: Evalúa el drift acumulado en el periodo subsiguiente.
+
+*Justificación:* El objetivo en riesgo de crédito es detectar cuándo la población solicitante deja de parecerse a los datos con los que el modelo aprendió a discriminar (`train`). Comparar únicamente `test` vs `validation` ocultaría el drift acumulado respecto al modelo de origen (por ejemplo, `int_rate` muestra un PSI de 0.265 frente a `train`, pero solo 0.038 entre `test` y `validation`).
+
+- **Variable respuesta:** incumplimiento (sí/no), definido a partir del estado final del préstamo (`Charged Off` / `Default` = 1, `Fully Paid` = 0).
 - **Variables explicativas:** monto, tasa de interés, plazo, ingreso anual, razón deuda-ingreso, antigüedad laboral y propósito del préstamo, entre otras.
 - **Filtro:** solo préstamos con resultado final observado, para evitar sesgo por créditos aún vigentes.
 
@@ -71,7 +181,7 @@ Cada técnica del curso responde a una parte de la pregunta:
 |---|-----|-------|-------|------------|------------|-------------|
 | 1 | Mar 24 | Acordar ventanas (años o trimestres), variables, y qué datos se reservan para los escenarios (paso 4 de la metodología). Crear repo y ambiente compartido. | Ambos | n/a | Decisiones por escrito | - |
 | 2 | Mar 24 | Descargar Lending Club, filtrar préstamos con resultado final, definir incumplimiento y crear las ventanas. | Jesús | 1 | Dataset limpio | • Generar 3 archivos nuevos para no correr la limpieza siempre (train, test, val)<br>• Generar variable objetivo y features (numéricas)<br>• Si hay variables categóricas transformar en numéricas: https://www.kdnuggets.com/2021/05/deal-with-categorical-data-machine-learning.html |
-| 3 | Mar 24 | Programar funciones de PSI (con número de bins configurable) y KS, probándolas con datos sintéticos. | Luis | 2 | Módulo de drift | Generar funciones que acepten df de polars |
+| 3 | Mar 24 | Programar funciones de PSI (con número de bins configurable) y KS, probándolas con datos sintéticos. | Luis | 2 | Módulo de drift | **Completado:** Implementado en `src/drift/metrics_computation.py` con Polars. Pruebas sintéticas en `tests/test_drift.py`. |
 | 4 | Mié 25 | Estadística descriptiva: observaciones y tasa de incumplimiento por ventana. | Jesús | 2 | Tablas y gráficas | • x3 meses<br>• Gráfica barra histograma<br>• violin plot |
 | 5 | Mié 25 | Bootstrap de PSI y KS en la ventana de referencia (validation), con intervalos de confianza. | Luis | 2, 3 | Distribuciones nulas | Usar validation para comparar resultados |
 | 6 | Jue 26 | Jackknife del sesgo y la varianza del PSI según tamaño de muestra y bins. | Luis | 2, 3 | Tabla de sesgo y varianza | - |
